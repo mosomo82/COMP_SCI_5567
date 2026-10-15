@@ -1,0 +1,20 @@
+{
+  "model": "yolo26m.pt",
+  "epochs_planned": 30,
+  "imgsz": 960,
+  "batch": 8,
+  "aug": {
+    "fliplr": 0.5,
+    "hsv_h": 0.015,
+    "hsv_s": 0.7,
+    "hsv_v": 0.4,
+    "scale": 0.5,
+    "degrees": 0.0,
+    "mosaic": 1.0
+  },
+  "seed": 42,
+  "cos_lr": true,
+  "patience": 10,
+  "split": "train: 02,04,05,10,11,13 | val: 09",
+  "gpu": "NVIDIA A100-SXM4-40GB"
+}

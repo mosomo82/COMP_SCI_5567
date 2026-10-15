@@ -1,0 +1,43 @@
+# Model weights (too big for Canvas/GitHub; keep on Drive and link in README)
+*.pt
+*.pth
+*.onnx
+*.engine
+*.torchscript
+*.ckpt
+
+# Datasets and training runs
+data/
+MOT16/
+yolo_mot16/
+runs/
+*.zip
+*.cache
+
+# Videos (share via Drive/YouTube link)
+*.mp4
+*.avi
+*.mov
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# LaTeX build files
+report/*.aux
+report/*.log
+report/*.out
+report/*.synctex.gz
+report/*.toc
