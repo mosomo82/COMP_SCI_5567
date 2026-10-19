@@ -1,0 +1,494 @@
+\documentclass[11pt,letterpaper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx,booktabs,amsmath,amssymb,hyperref,xcolor,caption,url}
+\usepackage[numbers]{natbib}
+\usepackage{enumitem}
+\setlist{itemsep=1pt,topsep=3pt}
+\setlength{\floatsep}{8pt plus 2pt minus 2pt}
+\setlength{\textfloatsep}{8pt plus 2pt minus 2pt}
+\setlength{\intextsep}{8pt plus 2pt minus 2pt}
+\newcommand{\todo}[1]{\textcolor{red}{[EVIDENCE NEEDED: #1]}}
+% figure macro: shows a box with the file name when the figure file is not in figures/ yet
+\newcommand{\fig}[3]{\begin{figure}[ht]\centering
+  \IfFileExists{figures/#1}{\includegraphics[width=#2\linewidth]{figures/#1}}%
+  {\fbox{\parbox{#2\linewidth}{\centering\vspace{1cm}\texttt{\detokenize{figures/#1}} missing\vspace{1cm}}}}
+  \caption{#3}\label{fig:#1}\end{figure}}
+
+\title{Offline Multi-Pedestrian Tracking on MOT16:\\
+Two Pipelines Compared}
+\author{Tony Nguyen \and Rehan Ali \and Bosia N'dri\\
+University of Missouri--Kansas City\\
+COMP-SCI 5567 Deep Learning}
+\date{Fall 2026}
+
+\begin{document}
+\maketitle
+
+% ===================== SECTION 1: ABSTRACT =====================
+\begin{abstract}
+Multi-object tracking finds every person in a video and keeps one identity for each person over time.
+We build and compare two offline tracking-by-detection pipelines on the MOT16 benchmark.
+Pipeline A uses a Faster R-CNN detector, a Siamese ReID network, and a custom tracker.
+Pipeline B uses a YOLO detector, a larger ReID network, the BoT-SORT tracker, and an appearance-based split and merge repair step.
+Both pipelines train on six sequences and are scored with TrackEval on the held-out sequence MOT16-09.
+We report three findings.
+First, the final outputs cover a similar share of pedestrians (recall 0.769 for Pipeline A and 0.779 for Pipeline B), but Pipeline B outputs fewer false boxes (462 against 1,073).
+Second, Pipeline A keeps identities more stable than BoT-SORT alone (35 against 46 ID switches; AssA 47.11 against 38.95), and the repair raises Pipeline B from HOTA 48.40 to 55.30 and from IDF1 55.65 to 68.04, but also from 46 to 56 ID switches.
+Third, no run tracks more than 2 of 18 long-lived people with one ID, and heavy occlusion is the main limit.
+All thresholds and checkpoints were chosen on the same sequence as the scores, so the scores are optimistic.
+\end{abstract}
+
+% ===================== SECTION 2: INTRODUCTION =====================
+\section{Introduction}
+Tracking people in video supports many systems, for example autonomous driving, surveillance, sports analytics, robotics, and retail analytics.
+A detector answers where the people are in each frame.
+A tracker must also answer who is who, so that each person keeps one identity over time.
+
+This second question is hard.
+In crowded scenes, people hide each other and often wear similar clothes.
+A person can disappear behind a pole for a few frames and return with a new identity, or a nearby person can take over the old identity.
+We saw both cases in our test videos.
+Such errors can lower identity-based scores even when the detector is good.
+
+We study this problem on MOT16~\cite{milan2016mot16}, a benchmark of crowded street videos.
+We follow the tracking-by-detection approach: a detector finds people in each frame, and a tracker links the boxes over time, as in SORT, DeepSORT, ByteTrack, and BoT-SORT~\cite{bewley2016sort,wojke2017deepsort,zhang2022bytetrack,aharon2022botsort}.
+We process whole videos, so our methods are offline and can use steps that an online tracker cannot use.
+We build two pipelines.
+Pipeline A follows the course template: Faster R-CNN~\cite{ren2015faster}, a Siamese ReID network, and a custom tracker.
+Pipeline B uses a YOLO detector~\cite{redmon2016yolo}, a larger ReID network, the BoT-SORT tracker, and our own appearance-based repair step.
+
+At first, each pipeline reported its own metrics with its own protocol, so the numbers could not be compared.
+Our contributions are:
+\begin{itemize}
+\item two complete pipelines that use the same data split and are evaluated with the same code (TrackEval, which implements HOTA~\cite{luiten2021hota});
+\item a common evaluation: the metric code of Pipeline A checked against TrackEval, one detector evaluator, and one ReID protocol;
+\item controlled experiments: an ablation of Pipeline A, a repair study for Pipeline B, a detector swap inside the tracker of Pipeline A, and a per-person analysis;
+\item an honest account of failures, including target videos on MOT16 test sequences.
+\end{itemize}
+Section~\ref{sec:method} describes the setup and both pipelines, Section~\ref{sec:challenges} lists the challenges, Section~\ref{sec:results} gives the results and self-evaluation, and Section~\ref{sec:conclusion} concludes.
+
+% ===================== SECTION 3: METHODOLOGY =====================
+\section{Methodology}\label{sec:method}
+
+\subsection{Shared setup}\label{sec:setup}
+\paragraph{Data.}
+MOT16 has seven training sequences with labels and seven test sequences without public labels.
+We split by sequence.
+Both pipelines train on MOT16-02, 04, 05, 10, 11, and 13, and we validate on MOT16-09 (525 frames, $1920\times1080$, 25 identities, 5,257 evaluated pedestrian boxes).
+A split by sequence avoids near-identical neighbouring frames in the validation set.
+The test sequences are used only for qualitative target videos.
+
+\paragraph{Annotation rules.}
+We evaluate pedestrians (class 1) that the benchmark marks for evaluation.
+Persons on vehicles, static persons, distractors, reflections, and pedestrians with evaluation flag 0 are ``don't care'' regions: a prediction on them is not an error.
+
+\paragraph{Metrics.}
+We score tracks with TrackEval (HOTA, CLEAR, Identity) on MOT16-09 and report HOTA~\cite{luiten2021hota} with its parts DetA and AssA, MOTA~\cite{bernardin2008clear}, IDF1~\cite{ristani2016idf1}, ID switches (IDSW), false positives (FP), and false negatives (FN).
+Pipeline A computed MOTA and IDF1 with its own code.
+On its saved tracks, TrackEval gives the same values (MOTA 55.83 against 55.8, IDF1 60.35 against 60.3, 35 ID switches, 1,073 false positives, and 1,214 misses), so its own code is reliable on this sequence.
+For detectors, we use one evaluator for both: all 525 frames, IoU 0.5, one-to-one matching in score order, and detections on ``don't care'' regions are ignored.
+We also report recall by box visibility at equal precision 0.80.
+For ReID, we report mAP and Rank-$k$.
+Each pipeline first used its own protocol.
+Pipeline A used every crop as a query and removed same-person crops within 15 frames (24 unseen people, 747 crops).
+Pipeline B used early crops as queries and late crops as the gallery, with a 20\% gap.
+We then apply the protocol of Pipeline B to all four models (two trained models and two ImageNet baselines) and call it the common protocol.
+
+\paragraph{Tuning.}
+Both pipelines chose thresholds or checkpoints on MOT16-09, so all scores are optimistic.
+
+\subsection{Pipeline A}\label{sec:pipeA}
+\paragraph{Detector.}
+We use the torchvision Faster R-CNN~\cite{ren2015faster} with a ResNet-50~\cite{he2016resnet} and FPN~\cite{lin2017fpn} backbone (v2 weights), COCO weights, and a new two-class head (background and pedestrian).
+The backbone is frozen, so 16.4 M of 43.3 M parameters are trained.
+Training uses 4 epochs, SGD with learning rate 0.005, batch size 4, every second frame of the training sequences, and flip, colour, and blur augmentation.
+
+\paragraph{ReID.}
+A Siamese network with shared weights~\cite{taigman2014deepface} embeds each crop.
+It is a ResNet-18 with a 128-dimensional embedding, trained with batch-hard triplet loss~\cite{hermans2017triplet} (margin 0.3) on 20,146 crops of 362 people (every third frame, visibility $\geq 0.5$, height $\geq 50$ px).
+Training runs for 25 epochs of 200 batches with Adam (learning rate $3\cdot10^{-4}$) and random erasing~\cite{zhong2020erasing}.
+
+\paragraph{Tracker.}
+Each track has a Kalman filter~\cite{kalman1960}.
+Detections and tracks are matched with the Hungarian algorithm~\cite{kuhn1955hungarian} on the cost $0.6\,d_{\mathrm{app}} + 0.4\,(1-\mathrm{IoU})$, where $d_{\mathrm{app}}$ is the appearance distance.
+A distance gate removes pairs that are too far apart.
+The first pass uses detections with score $\geq 0.7$.
+The second pass uses scores from 0.6 up to 0.7 and matches by IoU, in the spirit of ByteTrack~\cite{zhang2022bytetrack}.
+A track is confirmed after 3 hits and is deleted after 60 missed frames.
+The final appearance threshold is 0.15.
+Three offline rules follow: a track is split when the person leaves the picture, gaps of up to 5 frames are filled by interpolation, and tracks shorter than 8 frames are dropped.
+
+\subsection{Pipeline B}\label{sec:pipeB}
+\paragraph{Detector.}
+We fine-tune YOLO~\cite{redmon2016yolo} (model yolo26m, Ultralytics software~\cite{ultralytics}) with all layers, image size 960, up to 30 epochs, a cosine schedule, early stopping, and the standard Ultralytics augmentation.
+
+\paragraph{ReID.}
+The ReID network is a ResNet-50 with last stride 1 and global pooling, a BNNeck~\cite{luo2019bagoftricks}, and a 2048-dimensional embedding.
+The loss is identity cross-entropy with label smoothing 0.1 plus batch-hard triplet loss (margin 0.3).
+Training runs for 12 epochs with random erasing, on crops from every fifth frame with visibility $\geq 0.4$.
+We keep the checkpoint with the best validation mAP.
+
+\paragraph{Tracker.}
+We use BoT-SORT~\cite{aharon2022botsort} from the Ultralytics library, with a Kalman filter and camera-motion compensation.
+ReID is not used inside this tracker.
+
+\paragraph{Repair step (our own code).}
+After tracking, we compute an embedding for every box.
+A track is split where the mean embeddings of the previous 8 and the next 8 boxes differ by a cosine distance above 0.5.
+Then non-overlapping tracks are merged when the cosine distance of their mean embeddings is below 0.35, the time gap is at most 150 frames, and the position after the gap is plausible.
+
+\paragraph{Detector swap.}
+To separate detector and tracker effects, we feed the YOLO detections, embedded by the ReID model of Pipeline A, into the tracker of Pipeline A.
+We test four pairs of score thresholds: 0.7/0.6, 0.6/0.5, 0.5/0.4, and 0.4/0.3.
+
+\subsection{Implementation details}\label{sec:impl}
+Pipeline A runs on a free Colab T4 GPU.
+Pipeline B runs on an NVIDIA A100-SXM4-40GB GPU; its detector training took about 5,476 s for 30 epochs, and the best epoch was 21.
+All code uses PyTorch~\cite{paszke2019pytorch}, and checkpoints are saved to Google Drive with automatic resume after a Colab disconnect.
+In Pipeline A, the detector comes from torchvision, and the tracker, the ReID training, and the metric code are our own.
+In Pipeline B, the detector and BoT-SORT come from the Ultralytics library, and the ReID training, the repair step, the evaluation, and the target selection are our own.
+Table~\ref{tab:design} summarizes both pipelines.
+
+\begin{table}[h]
+\centering\small
+\caption{Design of the two pipelines.}\label{tab:design}
+\begin{tabular}{p{2.6cm}p{6.1cm}p{6.1cm}}
+\toprule
+ & Pipeline A & Pipeline B \\
+\midrule
+Detector & Faster R-CNN, ResNet-50-FPN v2, backbone frozen, 4 epochs & YOLO (yolo26m), all layers, up to 30 epochs \\
+ReID network & Siamese ResNet-18, 128-d & ResNet-50 with BNNeck, 2048-d \\
+ReID loss & batch-hard triplet & identity cross-entropy + batch-hard triplet \\
+ReID crops & every 3rd frame, visibility $\geq 0.5$ & every 5th frame, visibility $\geq 0.4$ \\
+Tracker & own: Kalman filter, Hungarian matching, gating, two passes & BoT-SORT (library) \\
+Offline steps & exit rule, gap fill (5 frames), drop tracks under 8 frames & split and merge repair with ReID \\
+Metric code & own code, checked against TrackEval & TrackEval \\
+GPU & Colab T4 & A100-SXM4-40GB \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ===================== SECTION 4: CHALLENGES =====================
+\section{Challenges and How We Solved Them}\label{sec:challenges}
+
+\paragraph{Identity switches and fragmentation after short occlusions.}
+In MOT16-03, a man who crossed behind a light pole received two IDs (235 and 263), and the track of the target with ID 166 changed its ID near frame 735.
+Pipeline A puts appearance into the matching step, and it has fewer ID switches than BoT-SORT alone (35 against 46) and a higher AssA (47.11 against 38.95).
+Pipeline B repairs tracks offline.
+The repair raises HOTA from 48.40 to 55.30 and IDF1 from 55.65 to 68.04, but it also raises the ID switches from 46 to 56.
+The problem is not solved: Section~\ref{sec:perperson} shows that most people still receive several IDs.
+
+\paragraph{Heavy occlusion.}
+Most missed pedestrians of Pipeline B have visibility below 0.25 (79\% of its misses).
+All pedestrians of MOT16-09 are at least 120 px tall, so small size is not the main limit on this sequence.
+In the lowest visibility bin, the detectors reach recall 0.471 (Pipeline B) and 0.316 (Pipeline A) at precision 0.80, and the final outputs reach 0.420 and 0.348.
+We did not add a method for this problem.
+Gap filling of up to 5 frames in Pipeline A cannot cover long occlusions.
+
+\paragraph{Optimistic validation.}
+Early prototypes used random frame splits and ReID validation on identities that were also in training, which gave numbers that were too good.
+We changed to a split by sequence, and we test ReID on unseen identities.
+A limit remains: both pipelines still tuned thresholds or checkpoints on MOT16-09 (Section~\ref{sec:limits}).
+
+\paragraph{Metrics that cannot be compared.}
+Each pipeline first used its own metric code and its own ReID protocol.
+We scored all tracks with TrackEval, used one detector evaluator, and used one ReID protocol for all models.
+The scores of YOLO and Faster R-CNN have different scales, so one threshold cannot be used for both.
+We therefore tested four threshold pairs in the detector swap.
+The best pair was chosen on the same sequence, so that result is optimistic.
+
+\paragraph{People who are not evaluated.}
+The benchmark ignores static people, reflections, and distractors.
+In MOT16-03, Pipeline B did not detect people who were sitting or standing still.
+A likely reason is that static persons were not in our training labels; we did not test this.
+Two false tracks (IDs 144 and 154) also appeared near a lit entrance cover, and we do not know the cause.
+
+\paragraph{Limited compute.}
+Colab sessions disconnect, and we found unreadable image frames after copying a sequence to the local disk.
+We re-copied the missing frames from Google Drive, and we saved checkpoints to Drive with automatic resume.
+
+\paragraph{Library code and own code.}
+The tracker of Pipeline B comes from a library, so it is not our own work.
+Our own parts in Pipeline B are the ReID training, the repair step, the evaluation, and the target selection.
+Pipeline A has its own tracker, and the detector swap puts the YOLO detections into that tracker to compare the two detectors under one tracker.
+
+% ===================== SECTION 5: RESULTS AND SELF-EVALUATION =====================
+\section{Results and Self-Evaluation}\label{sec:results}
+All results are on the held-out sequence MOT16-09 unless we say otherwise.
+Test sequences have no public labels, so their results are qualitative.
+
+\subsection{Detection}\label{sec:detection}
+Table~\ref{tab:detown} shows the evaluation that each pipeline made with its own code.
+The two columns are not directly comparable: they use different AP code, and Pipeline A appears to use every third frame of MOT16-09 (its notebook prints 175 frames).
+The Ultralytics evaluation of Pipeline B counts detections on non-evaluated people as false positives.
+
+\begin{table}[ht]
+\centering\small
+\caption{Detector results from each pipeline's own evaluation on MOT16-09.}\label{tab:detown}
+\begin{tabular}{llccc}
+\toprule
+Pipeline & Model & AP@0.5 / mAP@0.5 & Precision & Recall \\
+\midrule
+A & Faster R-CNN, COCO weights & 0.741 & 0.664 & 0.751 \\
+A & Faster R-CNN, fine-tuned & 0.780 & 0.743 & 0.769 \\
+B & YOLO, pretrained & 0.792 & 0.904 & 0.728 \\
+B & YOLO, fine-tuned & 0.872 & 0.905 & 0.780 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+We then evaluate both detectors with one evaluator (Section~\ref{sec:setup}).
+Figure~\ref{fig:unified_part2_pr.png} shows the precision--recall curves.
+Both detectors keep precision near 0.98 to 1.0 until recall of about 0.7, and Pipeline A is slightly higher there.
+The curves cross near recall 0.7.
+Above that point, Pipeline B keeps higher precision, and its maximum recall is about 0.82 against about 0.81 for Pipeline A (read from the figure).
+Table~\ref{tab:detap} gives the AP and the precision and recall at three score thresholds.
+The AP of Pipeline B (0.7896) is close to the AP of Pipeline A (0.7798).
+The AP of Pipeline A under this evaluator is close to the value in its own notebook (0.780), so the evaluator agrees with its code.
+The score scales of the two detectors differ, so equal thresholds in this table do not mean equal behavior.
+
+\begin{table}[ht]
+\centering\small
+\caption{AP@0.5 and precision (P) and recall (R) at three score thresholds, same evaluator (MOT16-09).}\label{tab:detap}
+\begin{tabular}{lccccccc}
+\toprule
+Detector & AP@0.5 & P@0.25 & R@0.25 & P@0.5 & R@0.5 & P@0.7 & R@0.7 \\
+\midrule
+Pipeline B, YOLO & 0.7896 & 0.868 & 0.775 & 0.928 & 0.729 & 0.962 & 0.678 \\
+Pipeline A, Faster R-CNN & 0.7798 & 0.644 & 0.783 & 0.744 & 0.770 & 0.795 & 0.758 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\fig{unified_part2_pr.png}{0.45}{Precision--recall curves of both detectors on MOT16-09 with the same evaluator.}
+
+Table~\ref{tab:detvis} compares recall by box visibility at the same precision (0.80).
+Pipeline B finds more heavily hidden people (0.471 against 0.316 at visibility below 0.25) and has a higher overall recall (0.798 against 0.757).
+For visibility from 0.5 upwards, the two detectors are close, and Pipeline A is slightly higher.
+These results hold for this precision and this sequence only.
+
+\begin{table}[ht]
+\centering\small
+\caption{Recall by box visibility at precision 0.80 (same evaluator, MOT16-09).}\label{tab:detvis}
+\begin{tabular}{lccccc}
+\toprule
+Detector (score threshold) & 0--0.25 & 0.25--0.5 & 0.5--0.75 & 0.75--1 & All \\
+\midrule
+Boxes in bin & 1,564 & 577 & 612 & 2,504 & 5,257 \\
+Pipeline B, YOLO ($\geq 0.13$) & 0.471 & 0.787 & 0.912 & 0.977 & 0.798 \\
+Pipeline A, Faster R-CNN ($\geq 0.72$) & 0.316 & 0.797 & 0.915 & 0.984 & 0.757 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:cover} shows the same matching rule on the final track outputs.
+The recall is similar (0.769 and 0.779), and Pipeline A outputs more unmatched boxes (1,073 against 478).
+TrackEval counts 462 false positives and 1,146 misses for Pipeline B because it handles ignore regions slightly differently; the values for Pipeline A are identical.
+
+\begin{table}[ht]
+\centering\small
+\caption{Coverage of the final track outputs (our matching rule, MOT16-09).}\label{tab:cover}
+\begin{tabular}{lcccc}
+\toprule
+Output & Recall & Missed & Unmatched boxes & Precision \\
+\midrule
+Pipeline A (published tracks) & 0.769 & 1,214 & 1,073 & 0.790 \\
+Pipeline B (BoT-SORT) & 0.779 & 1,162 & 478 & 0.895 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Re-identification}\label{sec:reid}
+Table~\ref{tab:reidown} gives the result of each pipeline under its own protocol.
+In both, the trained model is better than the ImageNet baseline.
+The two protocols differ, so we do not compare the rows across pipelines.
+
+\begin{table}[ht]
+\centering\small
+\caption{ReID results under each pipeline's own protocol (MOT16-09).}\label{tab:reidown}
+\begin{tabular}{lccc}
+\toprule
+Model & Rank-1 & mAP & Rank-5 \\
+\midrule
+A: ResNet-18, ImageNet only & 0.812 & 0.490 & -- \\
+A: Siamese ResNet-18, triplet loss & 0.914 & 0.728 & -- \\
+B: ResNet-50, ImageNet only & 0.533 & 0.460 & -- \\
+B: ResNet-50 + BNNeck, ID + triplet loss & 0.922 & 0.844 & 0.942 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:reidcommon} applies one protocol to all four models.
+Under this protocol, the trained model of Pipeline B scores higher than the trained model of Pipeline A (mAP 0.844 against 0.635; Rank-1 0.922 against 0.767).
+The Rank-1 of Pipeline A falls from 0.914 under its own protocol to 0.767 under the common protocol.
+The comparison has three caveats.
+Pipeline B uses a larger network and a larger input, so size and training method are mixed.
+Its checkpoint was chosen on this validation sequence (epoch 5; later epochs scored about 0.79 to 0.82 mAP).
+The test crops come from the crop extraction of Pipeline B.
+Figure~\ref{fig:reid_top5_matches.png} shows retrieval examples of Pipeline B.
+
+\begin{table}[ht]
+\centering\small
+\caption{ReID results under the common protocol (MOT16-09).}\label{tab:reidcommon}
+\begin{tabular}{lcccc}
+\toprule
+Model & mAP & Rank-1 & Rank-5 & Rank-10 \\
+\midrule
+A: ResNet-18, ImageNet only & 0.400 & 0.564 & 0.759 & 0.860 \\
+A: Siamese ResNet-18, triplet loss & 0.635 & 0.767 & 0.872 & 0.879 \\
+B: ResNet-50, ImageNet only & 0.460 & 0.533 & 0.786 & 0.860 \\
+B: ResNet-50 + BNNeck, ID + triplet loss & 0.844 & 0.922 & 0.942 & 0.946 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\fig{reid_top5_matches.png}{0.4}{Top-5 retrieval examples of the ReID model of Pipeline B on MOT16-09 (green border: same person).}
+
+\subsection{Tracking}\label{sec:tracking}
+Table~\ref{tab:track} lists all runs, scored by TrackEval.
+Figure~\ref{fig:unified_part1_bars.png} shows HOTA, IDF1, and MOTA for the saved tracks.
+
+\begin{table}[ht]
+\centering\footnotesize
+\setlength{\tabcolsep}{3pt}
+\caption{TrackEval results on MOT16-09. Rows marked ``hybrid'' use YOLO detections in the tracker of Pipeline A.}\label{tab:track}
+\begin{tabular}{p{5.2cm}rrrrrrrrr}
+\toprule
+Run & HOTA & DetA & AssA & MOTA & IDF1 & IDSW & FP & FN & IDs \\
+\midrule
+A published tracks & 50.40 & 53.97 & 47.11 & 55.83 & 60.35 & 35 & 1073 & 1214 & 54 \\
+A reproduced here & 50.21 & 53.94 & 46.79 & 55.85 & 62.38 & 33 & 1073 & 1215 & 54 \\
+B: pretrained YOLO + ByteTrack & 48.11 & 54.50 & 42.71 & 59.29 & 57.37 & 46 & 735 & 1359 & 92 \\
+B: fine-tuned YOLO + ByteTrack & 47.94 & 58.99 & 39.12 & 64.77 & 55.77 & 42 & 532 & 1278 & 73 \\
+B: fine-tuned YOLO + BoT-SORT & 48.40 & 60.36 & 38.95 & 68.54 & 55.65 & 46 & 462 & 1146 & 72 \\
+B: BoT-SORT + repair (0.5 / 0.35) & 55.30 & 60.25 & 50.89 & 68.35 & 68.04 & 56 & 462 & 1146 & 72 \\
+Hybrid, thresholds 0.7 / 0.6 & 50.12 & 56.41 & 44.57 & 66.24 & 61.88 & 21 & 145 & 1609 & 31 \\
+Hybrid, thresholds 0.6 / 0.5 & 51.08 & 58.18 & 44.93 & 67.38 & 62.65 & 30 & 229 & 1456 & 39 \\
+Hybrid, thresholds 0.5 / 0.4 & 47.73 & 59.56 & 38.37 & 68.61 & 54.70 & 40 & 290 & 1320 & 41 \\
+Hybrid, thresholds 0.4 / 0.3 & 47.91 & 59.96 & 38.40 & 69.15 & 55.93 & 50 & 364 & 1208 & 49 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\fig{unified_part1_bars.png}{0.65}{HOTA, IDF1, and MOTA of the saved tracks of both pipelines on MOT16-09 (TrackEval).}
+
+\paragraph{Pipeline A against BoT-SORT.}
+Pipeline A has fewer ID switches (35 against 46), fewer IDs (54 against 72), and a higher AssA (47.11 against 38.95) than the BoT-SORT run of Pipeline B.
+Pipeline B has a higher DetA (60.36 against 53.97) and a higher MOTA (68.54 against 55.83), mainly because it has fewer false positives (462 against 1,073).
+Appearance in the matching step, the offline rules, and strict score thresholds are likely reasons for the stability of Pipeline A; we did not test each one.
+The ablation in Table~\ref{tab:ablation} is consistent with this: the Kalman filter step has an IDF1 (56.2) close to the BoT-SORT run (55.65), and the Siamese step raises it to 62.2.
+The last two steps lower IDF1 (60.2 and 60.3) and MOTA (56.0 and 55.8), raise the false positives (998 and 1,073), and lower the misses (1,275 and 1,214).
+A likely reason is that filled gaps add boxes where no pedestrian is annotated; we did not test this.
+
+\begin{table}[ht]
+\centering\small
+\caption{Ablation of the tracker of Pipeline A on MOT16-09 (cumulative steps).}\label{tab:ablation}
+\begin{tabular}{lcccccc}
+\toprule
+Configuration & MOTA & IDF1 & IDSW & FP & FN & IDs \\
+\midrule
+IoU only & 56.3 & 47.7 & 71 & 930 & 1295 & 42 \\
++ Kalman filter & 57.6 & 56.2 & 43 & 895 & 1290 & 37 \\
++ Siamese ReID & 57.4 & 62.2 & 34 & 919 & 1288 & 43 \\
++ low-score second pass & 56.0 & 60.2 & 38 & 998 & 1275 & 47 \\
++ exit rule and gap fill (final) & 55.8 & 60.3 & 35 & 1073 & 1214 & 49 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Repair step of Pipeline B.}
+The repair raises HOTA from 48.40 to 55.30, AssA from 38.95 to 50.89, and IDF1 from 55.65 to 68.04, and it does not change DetA or MOTA much (60.36 to 60.25 and 68.54 to 68.35).
+The ID switches rise from 46 to 56.
+Merging alone (threshold 0.35, no split) gives HOTA 52.03, AssA 45.03, IDF1 62.58, MOTA 68.61, 42 ID switches, and 58 IDs.
+A split threshold of 0.4 cuts too often (74 to 75 ID switches).
+A likely reason for the extra ID switches is that each cut can count as a switch; we did not test this.
+
+\paragraph{Detector swap.}
+At thresholds 0.6/0.5, YOLO detections in the tracker of Pipeline A give 229 false positives against 1,073, and 1,456 misses against 1,215 for its own detections.
+MOTA rises from 55.85 to 67.38, HOTA from 50.21 to 51.08, and IDF1 from 62.38 to 62.65, and the ID switches fall from 33 to 30.
+Lower thresholds reduce the misses (1,208 at 0.4/0.3) but also reduce AssA (38.40 at 0.4/0.3), and the lowest ID switches (21) occur at 0.7/0.6.
+The best pair was chosen on this sequence, so these values are optimistic.
+
+\subsection{Per-person analysis and target videos}\label{sec:perperson}
+Table~\ref{tab:person} counts, for people who appear in at least 100 frames (18 of 25 people), how many are followed by one ID.
+A person is ``perfect'' if one predicted ID covers at least 90\% of the frames.
+The row of Pipeline A is identical to the file of Pipeline A itself.
+No run has more than 2 perfect people, and each person receives between 2.78 and 3.78 IDs on average.
+The repair raises the IDs per person (3.50 to 3.78) while it raises IDF1 and AssA, so its gain probably comes from cutting segments with a wrong identity and not from joining fragments; we did not test this.
+The hybrid has the fewest IDs per person (2.78) but lower coverage (0.720).
+
+\begin{table}[ht]
+\centering\small
+\caption{Per-person results for the 18 long-lived people of MOT16-09 (same matching rule for all runs).}\label{tab:person}
+\begin{tabular}{lcccc}
+\toprule
+Run & One ID & Perfect & Mean coverage & IDs per person \\
+\midrule
+A published & 5 & 2 & 0.767 & 2.94 \\
+B: BoT-SORT & 3 & 1 & 0.775 & 3.50 \\
+B: BoT-SORT + repair & 3 & 1 & 0.775 & 3.78 \\
+Hybrid (0.6 / 0.5) & 4 & 2 & 0.720 & 2.78 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Target videos.}
+Pipeline A: the target in MOT16-01 has ID 11 in frames 1 to 361, with no missing frame inside the track.
+The video is in the repository of Pipeline A (\url{https://github.com/Rehan-rahim/mot16-pedestrian-tracking_project/tree/main/outputs/videos}).
+Pipeline B: the target in MOT16-14 has ID 215.
+The video shows the full sequence (750 frames), and the target is highlighted in about frames 544 to 724.
+In the six sampled frames of Figure~\ref{fig:MOT16-14_target_stills.png}, the box is on the same man in a dark jacket as he crosses the road toward the camera; we did not check every frame.
+The videos of Pipeline B (MOT16-14 target, MOT16-03, and the MOT16-09 validation video) are in one folder: \url{https://drive.google.com/drive/folders/19Z_0Swv9Cj_GKvjMxshVTRSGltaQ7dk9}.
+In MOT16-03, the track of the person with ID 166 is visible in frames 352 to 735 and then changes its ID.
+We chose the targets as clean examples, so the videos show favorable cases: Table~\ref{tab:person} shows that most people are not tracked with one ID.
+
+\fig{target_filmstrip.jpg}{0.8}{Target of Pipeline A (ID 11) at evenly spaced moments of MOT16-01.}
+\fig{MOT16-14_target_stills.png}{0.8}{Target of Pipeline B (ID 215) in MOT16-14: six sampled frames of the target video (zoom inset at top left, yellow line: recent path).}
+
+\subsection{Speed}\label{sec:speed}
+Table~\ref{tab:speed} gives the speeds.
+They were measured on different GPUs, so they are not comparable.
+In Pipeline A, the detector uses 89\% of the time.
+
+\begin{table}[ht]
+\centering\small
+\caption{Speed of the pipelines (different GPUs; not comparable).}\label{tab:speed}
+\begin{tabular}{lcc}
+\toprule
+Stage & ms per frame & fps \\
+\midrule
+A: Faster R-CNN detection (Colab T4) & 104.17 & 9.6 \\
+A: Siamese ReID & 10.41 & -- \\
+A: tracker & 2.39 & -- \\
+A: whole pipeline (Colab T4) & 116.97 & 8.55 \\
+B: detection and tracking (GPU not recorded) & -- & about 29 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The ReID embedding and the repair step of Pipeline B are offline and add time that this table does not include.
+
+\subsection{Limitations}\label{sec:limits}
+\begin{itemize}
+\item We use one validation sequence (MOT16-09), and it has large pedestrians (all at least 120 px).
+\item Both pipelines chose thresholds or checkpoints on MOT16-09, and the hybrid result is the best of four settings, so all scores are optimistic.
+\item The scores of YOLO and Faster R-CNN have different scales, so equal thresholds do not mean equal behavior.
+\item The test sequences have no public labels, so target videos are qualitative, and we chose the targets ourselves.
+\item The speeds come from different GPUs.
+\item The ReID comparison mixes network size and training method, and the checkpoint of Pipeline B was chosen on MOT16-09.
+\item Causes that we call likely (extra ID switches of the repair, undetected static people, extra false positives after gap filling) were not tested.
+\item Our reproduction of Pipeline A has the same detections (1,073 false positives; 1,215 against 1,214 misses) but an IDF1 of 62.38 against 60.35 for the published tracks; we did not investigate the cause.
+\item The tracker of Pipeline B is a library, and its appearance is not used inside it.
+\end{itemize}
+
+% ===================== SECTION 6: CONCLUSION =====================
+\section{Conclusion}\label{sec:conclusion}
+We built two offline tracking pipelines for MOT16 and compared them with the same evaluation code on MOT16-09.
+The detectors cover a similar share of pedestrians, Pipeline B outputs fewer false boxes, Pipeline A keeps identities more stable than BoT-SORT alone, and the repair gives Pipeline B the highest HOTA (55.30) and IDF1 (68.04) with more ID switches (56), but no run tracks most people with one ID.
+Next, we would test a second validation sequence, train the detectors with static-person labels, and apply the repair to the tracker of Pipeline A.
+
+{\small
+\bibliographystyle{plainnat}
+\bibliography{refs}}
+
+\end{document}

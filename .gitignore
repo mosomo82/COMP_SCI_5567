@@ -41,3 +41,10 @@ report/*.log
 report/*.out
 report/*.synctex.gz
 report/*.toc
+report/*.bbl
+report/*.blg
+
+# Documentation / local reference files
+docs/
+docs/*
+docs/**
